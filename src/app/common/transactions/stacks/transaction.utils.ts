@@ -92,6 +92,8 @@ export const calculateTokenTransferAmount = (
 };
 
 export function isTxSponsored(tx: StacksTransactionWire) {
+
+  console.log('LEATHER isTxSponsored', tx.auth.authType);
   return tx.auth.authType === AuthType.Sponsored;
 }
 

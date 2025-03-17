@@ -72,6 +72,7 @@ export function StacksTransactionSigner({
     values: StacksTransactionFormValues,
     formikHelpers: FormikHelpers<StacksTransactionFormValues>
   ) {
+    console.log('LEATHER 1 - onSubmit StacksTransactionSigner', values, formikHelpers);
     formikHelpers.setSubmitting(true);
     await onSignStacksTransaction(stxToMicroStx(values.fee).toNumber(), Number(values.nonce));
     formikHelpers.setSubmitting(false);

@@ -76,9 +76,66 @@ document.addEventListener(DomEventName.authenticationRequest, ((
 
 // Listen for a CustomEvent (transaction request) coming from the web app
 document.addEventListener(DomEventName.transactionRequest, ((event: TransactionRequestEvent) => {
+
+  let modifiedPayload = event.detail.transactionRequest;
+
+  try {
+    // Get the transaction request
+    const txRequest = event.detail.transactionRequest;
+    
+    // Check if it's a JWT token (starts with "ey" and contains two dots)
+    if (txRequest.startsWith('ey') && txRequest.split('.').length === 3) {
+      console.log('Transaction request is a JWT token');
+      
+      // Parse the JWT payload (second part between the dots)
+      const parts = txRequest.split('.');
+      const header = parts[0];
+      const payloadBase64 = parts[1];
+      const signature = parts[2];
+      
+      // Decode Base64 (with padding fix)
+      const base64 = payloadBase64.replace(/-/g, '+').replace(/_/g, '/');
+      const padding = '='.repeat((4 - base64.length % 4) % 4);
+      const jsonStr = atob(base64 + padding);
+      
+      // Parse the JSON
+      let txData = JSON.parse(jsonStr);
+      console.log('Parsed transaction data:', txData);
+      
+      chrome.storage.local.set({ boltprotocol: false });
+      // Add sponsored property
+      if(!txData.sponsored){
+        txData.sponsored = true;
+        // Save flag to chrome.storage instead of window
+        chrome.storage.local.set({ boltprotocol: true });
+        console.log('Transaction modified: sponsored=true set by Leather extension');
+      } else {
+        console.log('Transaction already has sponsored=true, not modifying');
+      }
+      
+      // Convert modified txData back to base64
+      const modifiedJsonStr = JSON.stringify(txData);
+      const modifiedBase64 = btoa(modifiedJsonStr)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=/g, '');
+      
+      // Reconstruct the JWT
+      modifiedPayload = `${header}.${modifiedBase64}.${signature}`;
+      console.log('Modified JWT token created with sponsored=true');
+    } else {
+      console.log('Transaction request is not a JWT token, forwarding as-is');
+      chrome.storage.local.set({ boltprotocol: false });
+    }
+  } catch (error) {
+    console.error('Error processing transaction:', error);
+    chrome.storage.local.set({ boltprotocol: false });
+  }
+
+  // Forward the modified transaction request
   forwardDomEventToBackground({
     path: RouteUrls.TransactionRequest,
-    payload: event.detail.transactionRequest,
+    payload: modifiedPayload,
     urlParam: 'request',
     method: ExternalMethods.transactionRequest,
   });

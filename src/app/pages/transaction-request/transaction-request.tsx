@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 
 import { Formik, FormikHelpers } from 'formik';
@@ -45,6 +45,7 @@ import { useConfigSbtc } from '@app/query/common/remote-config/remote-config.que
 import { useCheckSbtcSponsorshipEligible } from '@app/query/sbtc/sponsored-transactions.hooks';
 import { submitSponsoredSbtcTransaction } from '@app/query/sbtc/sponsored-transactions.query';
 import { useCurrentStacksAccountAddress } from '@app/store/accounts/blockchain/stacks/stacks-account.hooks';
+import { useCurrentNetworkState } from '@app/store/networks/networks.hooks';
 import {
   useTransactionRequest,
   useTransactionRequestState,
@@ -54,8 +55,11 @@ import {
   useSignStacksTransaction,
   useUnsignedStacksTransactionBaseState,
 } from '@app/store/transactions/transaction.hooks';
+import axios from 'axios';
+import type { StacksTransactionWire } from '@stacks/transactions';
 
 function TransactionRequestBase() {
+  const [isBoltProtocol, setIsBoltProtocol] = useState(false);
   const sbtcConfig = useConfigSbtc();
   const { tabId } = useDefaultRequestParams();
   const requestToken = useTransactionRequest();
@@ -85,63 +89,187 @@ function TransactionRequestBase() {
 
   useOnMount(() => void analytics.track('view_transaction_signing'));
 
+  // Add a hook to read from chrome.storage when component mounts
+  useEffect(() => {
+    chrome.storage.local.get(['boltprotocol'], (result) => {
+      if (result.boltprotocol) {
+        setIsBoltProtocol(result.boltprotocol);
+      }
+    });
+  }, []);
+
+  const currentNetwork = useCurrentNetworkState();
+
   async function onSubmit(
     values: StacksTransactionFormValues,
     formikHelpers: FormikHelpers<StacksTransactionFormValues>
   ) {
     formikHelpers.setSubmitting(true);
-    if (sbtcSponsorshipEligibility?.isEligible) {
-      try {
-        const signedSponsoredTx = await signStacksTransaction(
-          sbtcSponsorshipEligibility.unsignedSponsoredTx!
-        );
-        if (!signedSponsoredTx) throw new Error('Unable to sign sponsored transaction!');
-        const result = await submitSponsoredSbtcTransaction(
-          sbtcConfig.sponsorshipApiUrl,
-          signedSponsoredTx
-        );
-        if (!result.txid) {
-          navigate(RouteUrls.TransactionBroadcastError, { state: { message: result.error } });
+
+    try {
+      if (isBoltProtocol) {
+        console.log('LEATHER: Transaction was modified by BoltProtocol');
+        
+        // Get the correct API base URL based on current network
+        const boltApiBaseUrl = currentNetwork.id === 'testnet4' 
+          ? 'http://localhost:4000/api/v1'
+          : 'https://boltproto.org/api/v1';
+        
+        console.log(`LEATHER: Using BoltProtocol API: ${boltApiBaseUrl} for ${currentNetwork.id}`);
+
+        // Generate and sign the transaction
+        const unsignedTx = await generateUnsignedTx(values);
+        if (!unsignedTx) {
+          logger.error('Failed to generate unsigned transaction in transaction-request');
+          formikHelpers.setSubmitting(false);
           return;
         }
-        if (requestToken && tabId) {
-          finalizeTxSignature({
-            requestPayload: requestToken,
-            tabId: tabId,
-            data: {
-              txRaw: stacksTransactionToHex(signedSponsoredTx),
-              txId: result.txid,
-            },
-          });
+        
+        const signedTx = await signStacksTransaction(unsignedTx);
+        if (!signedTx) {
+          throw new Error('Unable to sign transaction!');
         }
-      } catch (e: any) {
-        const message = isString(e) ? e : e.message;
-        navigate(RouteUrls.TransactionBroadcastError, { state: { message } });
+        
+        try {
+          console.log('Sending transaction to BoltProtocol API...');
+          
+          const response = await axios.post(
+            `${boltApiBaseUrl}/sponsor/sbtc-token/transaction`,
+            {
+              serializedTx: signedTx.serialize(),
+              fee: BigInt(100).toString()
+            }
+          );
+          
+          // Get txId from response - response.data should contain the txId as a string
+          const txId = response.data.txid;
+          console.log('BoltProtocol transaction broadcast successful. Transaction ID:', txId);
+          
+          // Return the transaction to app using the same pattern as stacksBroadcastTransaction
+          if (requestToken && tabId) {
+            console.log('Finalizing transaction signature with ID:' + txId);
+
+            // alert('LEATHER: FINALIZANDO TRANSAÇÃO');
+            
+            // This matches the logic in handlePreviewSuccess in useStacksBroadcastTransaction
+            finalizeTxSignature({
+              requestPayload: requestToken,
+              tabId: tabId,
+              data: {
+                txRaw: stacksTransactionToHex(signedTx),
+                txId: txId,
+              },
+            });
+            // alert('LEATHER: FINALIZANDO TRANSAÇÃO');
+            
+            // Navigate to success page after successful completion
+            // This also matches handlePreviewSuccess in useStacksBroadcastTransaction
+            navigate(
+              RouteUrls.SentStxTxSummary.replace(':symbol', 'stx').replace(':txId', txId),
+              {}
+            );
+            
+            // // Track analytics like the regular flow does
+            // void analytics.track('submit_fee_for_transaction', {
+            //   calculation: stxFees?.calculation || 'unknown',
+            //   fee: values.fee,
+            //   type: values.feeType,
+            // });
+            
+            // // Return the same structure that broadcastTransactionFn returns
+            // return { txid: txId, transaction: signedTx };
+          } else {
+            console.warn('Cannot finalize transaction: requestToken or tabId is missing');
+            throw new Error('Cannot finalize transaction: missing required data');
+          }
+
+        } catch (error: any) {
+          console.error('Error processing BoltProtocol:', error);
+
+          // Extract the error message from the response data
+          let errorMessage = 'Unknown error occurred';
+
+          if (error?.response?.data?.message) {
+            // Use the message field from the API response
+            errorMessage = error.response.data.message;
+          } else if (error?.message) {
+            // Fallback to error.message if response data doesn't have a message
+            errorMessage = error.message;
+          }
+
+          const errMsg = `BoltProtocol: ${errorMessage}`;
+          navigate(RouteUrls.TransactionBroadcastError, { state: { message: errMsg } });
+        } finally {
+          formikHelpers.setSubmitting(false);
+          // Reset the flag after using it
+          chrome.storage.local.set({ boltprotocol: false });
+          setIsBoltProtocol(false);
+          return;
+        }
+      } else {
+
+        if (sbtcSponsorshipEligibility?.isEligible) {
+          try {
+            const signedSponsoredTx = await signStacksTransaction(
+              sbtcSponsorshipEligibility.unsignedSponsoredTx!
+            );
+            if (!signedSponsoredTx) throw new Error('Unable to sign sponsored transaction!');
+            const result = await submitSponsoredSbtcTransaction(
+              sbtcConfig.sponsorshipApiUrl,
+              signedSponsoredTx
+            );
+            if (!result.txid) {
+              navigate(RouteUrls.TransactionBroadcastError, { state: { message: result.error } });
+              return;
+            }
+            if (requestToken && tabId) {
+              finalizeTxSignature({
+                requestPayload: requestToken,
+                tabId: tabId,
+                data: {
+                  txRaw: stacksTransactionToHex(signedSponsoredTx),
+                  txId: result.txid,
+                },
+              });
+            }
+          } catch (e: any) {
+            const message = isString(e) ? e : e.message;
+            navigate(RouteUrls.TransactionBroadcastError, { state: { message } });
+          }
+        } else {
+          // alert('LEATHER: PROCESSANDO UNSIGNED TX');
+          const unsignedTx = await generateUnsignedTx(values);
+  
+          if (!unsignedTx)
+            return logger.error('Failed to generate unsigned transaction in transaction-request');
+  
+          await stacksBroadcastTransaction(unsignedTx);
+        }
       }
-    } else {
-      const unsignedTx = await generateUnsignedTx(values);
 
-      if (!unsignedTx)
-        return logger.error('Failed to generate unsigned transaction in transaction-request');
-
-      await stacksBroadcastTransaction(unsignedTx);
+      void analytics.track('submit_fee_for_transaction', {
+        calculation: stxFees?.calculation || 'unknown',
+        fee: values.fee,
+        type: values.feeType,
+      });
+    } catch (e: any) {
+      const message = isString(e) ? e : e.message;
+      navigate(RouteUrls.TransactionBroadcastError, { state: { message } });
+    } finally {
+      formikHelpers.setSubmitting(false);
+      // Reset the flag after using it
+      chrome.storage.local.set({ boltprotocol: false });
+      setIsBoltProtocol(false);
     }
-
-    void analytics.track('submit_fee_for_transaction', {
-      calculation: stxFees?.calculation || 'unknown',
-      fee: values.fee,
-      type: values.feeType,
-    });
-    formikHelpers.setSubmitting(false);
   }
 
   if (!transactionRequest) return null;
 
   const validationSchema = !transactionRequest.sponsored
     ? yup.object({
-        fee: stxFeeValidator(availableUnlockedBalance),
-        nonce: nonceValidator,
-      })
+      fee: stxFeeValidator(availableUnlockedBalance),
+      nonce: nonceValidator,
+    })
     : null;
 
   const initialValues: StacksTransactionFormValues = {
