@@ -22,10 +22,6 @@ This wallet extension serves as a proof of concept for the Bolt Protocol integra
 
 **Note:** As this is a Proof of Concept implementation, it has only been tested on the Google Chrome browser.
 
-## Contributing
-
-If you'd like to contribute to this project, please see our [contribution guide](.github/CONTRIBUTING.md).
-
 ## Running the extension
 
 This application is a Web Extension. There is no ability to run it as a standalone web application.
